@@ -1,0 +1,27 @@
+# competition data / external datasets — large binaries, redistribution not allowed
+Baseline/data/
+aihub/
+*.mp4
+*.avi
+*.mov
+
+# model checkpoints / submission artifacts
+model/
+submit/model/
+submit.zip
+*.pt
+*.pth
+
+# generated inference script (rebuilt from notebook cells each run)
+Baseline/inference.py
+Baseline/sample_evaluation_data/
+Baseline/output/
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# os
+.DS_Store
+Thumbs.db
