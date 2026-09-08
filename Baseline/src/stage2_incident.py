@@ -77,29 +77,40 @@ def find_collision_frame(frames: list) -> int:
 def find_entry_and_scene(model, transform, categories, frames: list, collision_frame: int):
     """collision_frame 이전 구간에서 상대차량이 처음 '크게' 잡히는 시점/방향, 충돌 직전 여유공간."""
     h, w = frames[0].shape[:2]
-    entry_frame, entry_side, box_at_collision = None, None, None
-    for t in range(max(0, collision_frame - 30), collision_frame + 1):
+    window_lo = max(0, collision_frame - 30)
+    window_hi = min(len(frames) - 1, collision_frame + 5)  # 충돌 직후 몇 프레임도 봐야 근접탐지 fallback 가능
+
+    detections = {}
+    entry_frame, entry_side = None, None
+    for t in range(window_lo, window_hi + 1):
         det = detect_vehicles(model, transform, categories, frames[t])
         if det is None:
             continue
+        detections[t] = det
         x0, y0, x1, y1, score = det
         area_frac = (x1 - x0) * (y1 - y0) / (w * h)
-        if entry_frame is None and area_frac > 0.03:  # 화면의 3% 이상 = '진입'으로 간주
+        if entry_frame is None and t <= collision_frame and area_frac > 0.03:  # 화면의 3% 이상 = '진입'으로 간주
             entry_frame = t
             entry_side = "LEFT" if (x0 + x1) / 2 < w / 2 else "RIGHT"
-        if t == collision_frame:
-            box_at_collision = (x0, y0, x1, y1)
 
     if entry_frame is None:  # 못 찾으면 충돌 프레임 자체로 폴백
         entry_frame, entry_side = collision_frame, "RIGHT"
 
+    # 충돌 순간은 모션블러로 탐지가 자주 빠진다 — 가장 가까운 프레임의 박스로 대체(0으로 뭉개지 않게)
+    box_at_collision = None
+    if detections:
+        nearest_t = min(detections, key=lambda t: abs(t - collision_frame))
+        box_at_collision = detections[nearest_t]
+
     evasion_space = 0
+    collision_box_frame, collision_box = None, None
     if box_at_collision is not None:
-        x0, y0, x1, y1 = box_at_collision
+        collision_box_frame, collision_box = nearest_t, box_at_collision
+        x0, y0, x1, y1, score = box_at_collision
         free_left, free_right = x0, w - x1
         evasion_space = int(max(free_left, free_right) > 0.15 * w)
 
-    return entry_frame, entry_side, evasion_space
+    return entry_frame, entry_side, evasion_space, collision_box_frame, collision_box
 
 
 # --------------------------------------------------------------------------- calibration / self-check
@@ -116,7 +127,7 @@ def main():
     for row in labels.itertuples():
         frames = load_frames(DATA / "stage2" / row.path)
         pred_collision = find_collision_frame(frames)
-        entry_frame, entry_side, evasion = find_entry_and_scene(model, transform, categories, frames, pred_collision)
+        entry_frame, entry_side, evasion, _, _ = find_entry_and_scene(model, transform, categories, frames, pred_collision)
         err = abs(pred_collision - row.t_collision)
         errors.append(err)
         print(f"{row.ID}: collision pred={pred_collision} true={row.t_collision} err={err} | "
@@ -125,7 +136,7 @@ def main():
     mae = float(np.mean(errors))
     print(f"\ncollision_frame MAE (검증 가능): {mae:.2f} frames")
     print("entry_frame/entry_side/evasion_space: 라벨이 없어 위 출력을 눈으로만 확인 - 정량 검증 불가")
-    assert mae < 10, "충돌 프레임 오차가 너무 큼 — motion_energy 로직 점검 필요"
+    assert mae < 10, "충돌 프레임 오차가 너무 큼 - motion_energy 로직 점검 필요"
 
 
 if __name__ == "__main__":

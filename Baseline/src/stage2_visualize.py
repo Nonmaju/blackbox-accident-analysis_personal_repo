@@ -39,16 +39,21 @@ def main():
     for row in labels.itertuples():
         frames = load_frames(DATA / "stage2" / row.path)
         collision = find_collision_frame(frames)
-        entry_frame, entry_side, evasion = find_entry_and_scene(model, transform, categories, frames, collision)
+        entry_frame, entry_side, evasion, box_frame, box = find_entry_and_scene(
+            model, transform, categories, frames, collision
+        )
 
         from stage2_incident import detect_vehicles
         entry_det = detect_vehicles(model, transform, categories, frames[entry_frame])
-        collision_det = detect_vehicles(model, transform, categories, frames[collision])
 
         p1 = out_dir / f"{row.ID}_entry_{entry_side}.png"
         imwrite_unicode(p1, draw_box(frames[entry_frame], entry_det, f"entry frame={entry_frame} side={entry_side}"))
+        # evasion_space 판단에 실제로 쓰인 박스를 그린다(충돌 프레임에서 탐지 실패 시 가장 가까운 프레임으로 대체됨)
+        box_label = f"collision frame={collision} evasion={evasion}"
+        if box_frame is not None and box_frame != collision:
+            box_label += f" (box from frame={box_frame}, no detection at collision)"
         p2 = out_dir / f"{row.ID}_collision_evasion{evasion}.png"
-        imwrite_unicode(p2, draw_box(frames[collision], collision_det, f"collision frame={collision} evasion={evasion}", (0, 0, 255)))
+        imwrite_unicode(p2, draw_box(frames[box_frame if box_frame is not None else collision], box, box_label, (0, 0, 255)))
         saved += [p1, p2]
         print(f"{row.ID}: saved {p1.name}, {p2.name}", flush=True)
 

@@ -107,7 +107,7 @@ def calibrate() -> dict:
     acc, stopped_thr, accel_eps, steer_thr = best
     print(f"calibrated acc on 50 sparse labels: {acc:.3f}  "
           f"(stopped_thr={stopped_thr:.3f}, accel_eps={accel_eps:.3f}, steer_thr={steer_thr:.3f})")
-    assert acc > 0.5, "휴리스틱이 라벨과 거의 무관 — flow ROI/부호를 재점검할 것"
+    assert acc > 0.5, "휴리스틱이 라벨과 거의 무관 - flow ROI/부호를 재점검할 것"
     return {"stopped_thr": stopped_thr, "accel_eps": accel_eps, "steer_thr": steer_thr}
 
 

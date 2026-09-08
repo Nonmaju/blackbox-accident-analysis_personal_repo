@@ -184,7 +184,7 @@ def main():
 
     checkpoint, acc = train_logreg(X, y)
     print(f"train accuracy: {acc:.3f}")
-    assert acc > 0.85, "학습 정확도가 너무 낮음 — 피처/증강 로직을 점검할 것"
+    assert acc > 0.85, "학습 정확도가 너무 낮음 - 피처/증강 로직을 점검할 것"
 
     out = ROOT / "model" / "stage1"
     out.mkdir(parents=True, exist_ok=True)
