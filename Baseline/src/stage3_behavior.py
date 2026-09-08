@@ -1,0 +1,123 @@
+"""Stage 3 v1 (얕은 버전): 0.1초 단위 가감속/조향 범주.
+
+라벨이 6초 간격으로만 있어서(공개 예제) 딥러닝으로 학습할 데이터가 사실상 없다.
+대신 이 문제는 라벨이 필요 없다 — optical flow만으로 전방 이동량(가감속)과
+좌우 편향(조향)을 직접 잴 수 있다. 순수 휴리스틱 + 공개 라벨 50개로 임계값만 보정.
+
+ponytail: 학습 없는 optical-flow 휴리스틱. AIHub CAN데이터(실측 가감속/조향) 승인되면
+그걸로 임계값을 다시 보정하거나, 필요시 이 피처를 입력으로 쓰는 얕은 분류기로 교체.
+
+이 파일도 학습/보정 전용 — inference.py에는 compute_flow_series+classify를 그대로 복사한다.
+"""
+from __future__ import annotations
+
+import itertools
+from pathlib import Path
+
+import cv2
+import numpy as np
+import pandas as pd
+import torch
+
+from video_io import load_frames
+
+ROOT = Path(__file__).resolve().parents[1]
+DATA = ROOT / "data"
+ACCEL = ["ACCELERATING", "DECELERATING", "CONSTANT", "STOPPED"]
+STEER = ["LEFT", "STRAIGHT", "RIGHT"]
+FLOW_SIZE = (160, 90)  # (w, h) — 다운스케일해서 Farneback 속도 확보
+
+
+# --------------------------------------------------------------------------- optical flow features
+def compute_flow_series(frames: list) -> tuple[np.ndarray, np.ndarray]:
+    """0.1초(=2프레임) 간격의 (전방속도 proxy, 좌우편향 proxy) 시계열을 반환."""
+    small = [cv2.resize(cv2.cvtColor(f, cv2.COLOR_RGB2GRAY), FLOW_SIZE) for f in frames]
+    n = len(small) // 2
+    w, h = FLOW_SIZE
+    road = slice(int(h * 0.55), h)          # 하단: 도로면, 전진속도에 민감
+    horizon = slice(int(h * 0.25), int(h * 0.55))  # 중단: 소실점 부근, 조향에 민감
+
+    speed = np.zeros(n, dtype=np.float32)
+    steer = np.zeros(n, dtype=np.float32)
+    for t in range(n):
+        i0 = min(2 * t, len(small) - 3)
+        i1 = i0 + 2
+        flow = cv2.calcOpticalFlowFarneback(small[i0], small[i1], None, 0.5, 2, 15, 3, 5, 1.2, 0)
+        mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
+        speed[t] = float(np.median(mag[road]))
+        steer[t] = float(np.median(flow[horizon, :, 0]))
+    return speed, steer
+
+
+def _smooth(x: np.ndarray, k: int = 3) -> np.ndarray:
+    if len(x) < 2 * k + 1:
+        return x
+    kernel = np.ones(2 * k + 1) / (2 * k + 1)
+    return np.convolve(x, kernel, mode="same")
+
+
+def classify(speed: np.ndarray, steer: np.ndarray, stopped_thr: float, accel_eps: float, steer_thr: float):
+    speed_s = _smooth(speed)
+    n = len(speed_s)
+    accel_out, steer_out = [], []
+    for t in range(n):
+        if speed_s[t] < stopped_thr:
+            accel_out.append("STOPPED")
+        else:
+            lo, hi = max(0, t - 3), min(n, t + 4)
+            slope = speed_s[hi - 1] - speed_s[lo] if hi - 1 > lo else 0.0
+            if slope > accel_eps:
+                accel_out.append("ACCELERATING")
+            elif slope < -accel_eps:
+                accel_out.append("DECELERATING")
+            else:
+                accel_out.append("CONSTANT")
+        s = steer[t]
+        steer_out.append("LEFT" if s < -steer_thr else "RIGHT" if s > steer_thr else "STRAIGHT")
+    return accel_out, steer_out
+
+
+# --------------------------------------------------------------------------- threshold calibration
+def calibrate() -> dict:
+    labels = pd.read_csv(DATA / "stage3/labels.csv")
+    cache = {}
+    for vid_id, group in labels.groupby("ID"):
+        frames = load_frames(DATA / "stage3/videos" / f"{vid_id}.mp4")
+        cache[vid_id] = (compute_flow_series(frames), group)
+
+    best = None
+    grid = itertools.product(
+        np.linspace(0.1, 1.5, 6),   # stopped_thr
+        np.linspace(0.02, 0.3, 6),  # accel_eps
+        np.linspace(0.1, 1.0, 6),   # steer_thr
+    )
+    for stopped_thr, accel_eps, steer_thr in grid:
+        correct, total = 0, 0
+        for vid_id, ((speed, steer), group) in cache.items():
+            accel_pred, steer_pred = classify(speed, steer, stopped_thr, accel_eps, steer_thr)
+            for row in group.itertuples():
+                idx = min(row.sample_index, len(accel_pred) - 1)
+                total += 2
+                correct += accel_pred[idx] == row.accel_label
+                correct += steer_pred[idx] == row.steer_label
+        acc = correct / total
+        if best is None or acc > best[0]:
+            best = (acc, stopped_thr, accel_eps, steer_thr)
+
+    acc, stopped_thr, accel_eps, steer_thr = best
+    print(f"calibrated acc on 50 sparse labels: {acc:.3f}  "
+          f"(stopped_thr={stopped_thr:.3f}, accel_eps={accel_eps:.3f}, steer_thr={steer_thr:.3f})")
+    assert acc > 0.5, "휴리스틱이 라벨과 거의 무관 — flow ROI/부호를 재점검할 것"
+    return {"stopped_thr": stopped_thr, "accel_eps": accel_eps, "steer_thr": steer_thr}
+
+
+def main():
+    params = calibrate()
+    out = ROOT / "model" / "stage3"
+    out.mkdir(parents=True, exist_ok=True)
+    torch.save(params, out / "best.pt")
+    print(f"saved -> {out / 'best.pt'}")
+
+
+if __name__ == "__main__":
+    main()

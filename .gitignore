@@ -21,7 +21,11 @@ Baseline/output/
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
+.venv/
 
 # os
 .DS_Store
 Thumbs.db
+
+# local run logs (scratch, not source)
+*_run.log
