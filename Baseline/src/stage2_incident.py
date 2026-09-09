@@ -44,18 +44,24 @@ def load_detector():
 
 @torch.inference_mode()
 def detect_vehicles(model, transform, categories, frame: np.ndarray):
-    """frame(RGB) 안의 차량류 박스 중 가장 큰 것 1개 반환: (x0,y0,x1,y1,score) or None."""
+    """frame(RGB) 안의 차량류 박스 중 하나 반환: (x0,y0,x1,y1,score) or None.
+
+    선택 규칙: score*area 최대. 실라벨 183프레임으로 여러 규칙을 캐시 위에서 비교했을 때
+    (stage2_selection_search.py) 가장 나은 값 - largest_area 대비 mean IoU 0.331->0.352,
+    적중률 39.3%->42.6%. oracle(후보 중 최선)은 0.51/63.4%라 아직 갭 있음 - 남은 갭은
+    간단한 재정렬 규칙으로는 못 메웠고(트래킹도 실패) 파인튜닝이 필요한 영역으로 보임.
+    """
     x = transform(torch.from_numpy(frame).permute(2, 0, 1))
     out = model([x])[0]
-    best = None
+    best, best_key = None, -1.0
     for box, label, score in zip(out["boxes"], out["labels"], out["scores"]):
         if score < SCORE_THR or categories[label] not in VEHICLE_CLASSES:
             continue
         x0, y0, x1, y1 = box.tolist()
-        area = (x1 - x0) * (y1 - y0)
-        if best is None or area > best[-1]:
-            best = (x0, y0, x1, y1, float(score), area)
-    return best[:5] if best else None
+        key = float(score) * (x1 - x0) * (y1 - y0)
+        if key > best_key:
+            best, best_key = (x0, y0, x1, y1, float(score)), key
+    return best
 
 
 @torch.inference_mode()
