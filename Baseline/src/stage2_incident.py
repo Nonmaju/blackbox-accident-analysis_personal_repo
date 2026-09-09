@@ -38,7 +38,7 @@ RERANK_FEATURES = ["cx", "cy", "bw", "bh", "score", "aspect"]
 # --------------------------------------------------------------------------- detector
 def load_detector():
     weights = FasterRCNN_MobileNet_V3_Large_320_FPN_Weights.DEFAULT
-    model = fasterrcnn_mobilenet_v3_large_320_fpn(weights=weights)
+    model = fasterrcnn_mobilenet_v3_large_320_fpn(weights=weights)  # 학습 시엔 인터넷 있으니 그대로 다운로드
     model.eval()
     categories = weights.meta["categories"]
     return model, weights.transforms(), categories
