@@ -58,6 +58,60 @@ def detect_vehicles(model, transform, categories, frame: np.ndarray):
     return best[:5] if best else None
 
 
+@torch.inference_mode()
+def detect_all_vehicles(model, transform, categories, frame: np.ndarray, score_thr: float = 0.2):
+    """진단용: score_thr 이상인 모든 차량류 박스를 반환 (선택 규칙 없이 후보 전체)."""
+    x = transform(torch.from_numpy(frame).permute(2, 0, 1))
+    out = model([x])[0]
+    candidates = []
+    for box, label, score in zip(out["boxes"], out["labels"], out["scores"]):
+        if score < score_thr or categories[label] not in VEHICLE_CLASSES:
+            continue
+        x0, y0, x1, y1 = box.tolist()
+        candidates.append((x0, y0, x1, y1, float(score)))
+    return candidates
+
+
+def _iou_boxes(a, b):
+    ax0, ay0, ax1, ay1 = a[:4]
+    bx0, by0, bx1, by1 = b[:4]
+    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
+    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
+    inter = max(0, ix1 - ix0) * max(0, iy1 - iy0)
+    area_a, area_b = (ax1 - ax0) * (ay1 - ay0), (bx1 - bx0) * (by1 - by0)
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def track_target_vehicle(model, transform, categories, frames, start, end, score_thr=0.3, min_track_iou=0.1):
+    """start..end를 순서대로 훑으며 같은 차량을 계속 추적(간단 IoU 그리디 트래킹).
+
+    프레임마다 독립적으로 '가장 큰 박스'를 고르면(기존 detect_vehicles) 프레임마다 다른
+    차를 고를 위험이 크다 - 실라벨 대비 진단 결과 이게 병목이었다(oracle IoU 0.51 vs
+    실제규칙 0.33). 대신 직전 프레임 박스와 IoU가 가장 높은 후보를 이어서 따라가고,
+    추적을 놓치면(IoU가 다 낮으면) 크기*신뢰도 기준으로 재초기화한다.
+    반환: {frame_idx: (x0,y0,x1,y1,score) or None}
+    """
+    track = {}
+    current = None
+    for t in range(start, end + 1):
+        candidates = detect_all_vehicles(model, transform, categories, frames[t], score_thr=score_thr)
+        if not candidates:
+            track[t] = None
+            current = None
+            continue
+        if current is not None:
+            best = max(candidates, key=lambda c: _iou_boxes(current, c))
+            if _iou_boxes(current, best) >= min_track_iou:
+                current = best
+            else:
+                current = None
+        if current is None:
+            current = max(candidates, key=lambda c: c[4] * (c[2] - c[0]) * (c[3] - c[1]))
+        track[t] = current
+    return track
+
+
 # --------------------------------------------------------------------------- collision frame (라벨 있음, 검증 가능)
 def motion_energy(frames: list) -> np.ndarray:
     grays = [cv2.resize(cv2.cvtColor(f, cv2.COLOR_RGB2GRAY), (320, 180)) for f in frames]
@@ -75,7 +129,14 @@ def find_collision_frame(frames: list) -> int:
 
 # --------------------------------------------------------------------------- entry/evasion/side (라벨 없음, 휴리스틱)
 def find_entry_and_scene(model, transform, categories, frames: list, collision_frame: int):
-    """collision_frame 이전 구간에서 상대차량이 처음 '크게' 잡히는 시점/방향, 충돌 직전 여유공간."""
+    """collision_frame 이전 구간에서 상대차량이 처음 '크게' 잡히는 시점/방향, 충돌 직전 여유공간.
+
+    실라벨 진단: 최대박스 규칙 IoU 0.33/적중 39%, oracle(후보 중 최선) 0.51/63% - 규칙을
+    바꾸면 이론상 오를 여지가 있었으나 IoU 기반 그리디 트래킹(track_target_vehicle)으로
+    시도해보니 IoU 0.335/적중 39.0%로 사실상 동일했다(첫 프레임에서 틀리면 계속 그 차를
+    따라감). 그래서 다시 단순한 프레임별 최대박스로 되돌림 - 이득 없는 복잡성은 안 남긴다.
+    entry_side/evasion_space는 여전히 신뢰도 낮음, 다음 손볼 대상은 파인튜닝.
+    """
     h, w = frames[0].shape[:2]
     window_lo = max(0, collision_frame - 30)
     window_hi = min(len(frames) - 1, collision_frame + 5)  # 충돌 직후 몇 프레임도 봐야 근접탐지 fallback 가능
