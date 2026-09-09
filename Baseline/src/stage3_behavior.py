@@ -73,7 +73,9 @@ def classify(speed: np.ndarray, steer: np.ndarray, stopped_thr: float, accel_eps
             else:
                 accel_out.append("CONSTANT")
         s = steer[t]
-        steer_out.append("LEFT" if s < -steer_thr else "RIGHT" if s > steer_thr else "STRAIGHT")
+        # 부호 주의: 카메라가 좌회전하면 정지된 배경은 화면에서 오른쪽으로 흐른다(flow_x 양수).
+        # AIHub 실측 자이로(angZAve) + 실제 프레임 확인(좌회전 차선에서 회전)으로 검증된 부호.
+        steer_out.append("LEFT" if s > steer_thr else "RIGHT" if s < -steer_thr else "STRAIGHT")
     return accel_out, steer_out
 
 
