@@ -11,7 +11,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from stage2_incident import detect_vehicles, load_detector
+from stage2_incident import detect_vehicles, load_detector, load_reranker
 from video_io import load_frames
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +56,8 @@ def main():
     print(f"라벨 있는 비디오: {len(labels)}개 / 실제 보유 비디오: {len(videos)}개 / 교집합: {len(labels.keys() & videos.keys())}개")
 
     model, transform, categories = load_detector()
+    reranker = load_reranker()
+    print(f"reranker: {'있음, 사용' if reranker else '없음 - score*area 폴백'}")
 
     ious, hits = [], 0
     n_frames = 0
@@ -67,7 +69,7 @@ def main():
             if frame_no >= len(frames):
                 continue
             n_frames += 1
-            det = detect_vehicles(model, transform, categories, frames[frame_no])
+            det = detect_vehicles(model, transform, categories, frames[frame_no], reranker=reranker)
             if det is None:
                 ious.append(0.0)
                 continue

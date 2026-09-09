@@ -91,7 +91,8 @@ def main():
     print(f"학습 재정렬기:      mean IoU {learned_mean:.3f}  IoU>0.5 {learned_hit:.1%}")
 
     if learned_mean > baseline_mean:
-        out = OUT.parent / "stage2_reranker.pt"
+        out = OUT.parents[2] / "model" / "stage2" / "reranker.pt"
+        out.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"state_dict": model.state_dict(), "mean": mean, "std": std, "features": FEATURES}, out)
         print(f"\n개선 확인됨 -> 저장: {out}")
     else:

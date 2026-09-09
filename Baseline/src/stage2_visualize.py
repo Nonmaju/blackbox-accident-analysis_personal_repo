@@ -8,7 +8,7 @@ from pathlib import Path
 import cv2
 import pandas as pd
 
-from stage2_incident import DATA, ROOT, find_collision_frame, find_entry_and_scene, load_detector
+from stage2_incident import DATA, ROOT, find_collision_frame, find_entry_and_scene, load_detector, load_reranker
 from video_io import load_frames
 
 
@@ -31,6 +31,7 @@ def imwrite_unicode(path: Path, img):
 
 def main():
     model, transform, categories = load_detector()
+    reranker = load_reranker()
     out_dir = ROOT / "output" / "stage2_viz"
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -40,11 +41,11 @@ def main():
         frames = load_frames(DATA / "stage2" / row.path)
         collision = find_collision_frame(frames)
         entry_frame, entry_side, evasion, box_frame, box = find_entry_and_scene(
-            model, transform, categories, frames, collision
+            model, transform, categories, frames, collision, reranker=reranker
         )
 
         from stage2_incident import detect_vehicles
-        entry_det = detect_vehicles(model, transform, categories, frames[entry_frame])
+        entry_det = detect_vehicles(model, transform, categories, frames[entry_frame], reranker=reranker)
 
         p1 = out_dir / f"{row.ID}_entry_{entry_side}.png"
         imwrite_unicode(p1, draw_box(frames[entry_frame], entry_det, f"entry frame={entry_frame} side={entry_side}"))

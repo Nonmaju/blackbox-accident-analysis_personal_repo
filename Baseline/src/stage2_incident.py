@@ -20,6 +20,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import torch
+from torch import nn
 from torchvision.models.detection import (
     FasterRCNN_MobileNet_V3_Large_320_FPN_Weights,
     fasterrcnn_mobilenet_v3_large_320_fpn,
@@ -31,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 VEHICLE_CLASSES = {"car", "motorcycle", "bus", "truck"}
 SCORE_THR = 0.5
+RERANK_FEATURES = ["cx", "cy", "bw", "bh", "score", "aspect"]
 
 
 # --------------------------------------------------------------------------- detector
@@ -42,31 +44,53 @@ def load_detector():
     return model, weights.transforms(), categories
 
 
-@torch.inference_mode()
-def detect_vehicles(model, transform, categories, frame: np.ndarray):
-    """frame(RGB) 안의 차량류 박스 중 하나 반환: (x0,y0,x1,y1,score) or None.
+def load_reranker(path=None):
+    """후보 박스 중 '상대차량'을 고르는 학습된 재정렬기 (stage2_rerank_train.py 산출물).
 
-    선택 규칙: score*area 최대. 실라벨 183프레임으로 여러 규칙을 캐시 위에서 비교했을 때
-    (stage2_selection_search.py) 가장 나은 값 - largest_area 대비 mean IoU 0.331->0.352,
-    적중률 39.3%->42.6%. oracle(후보 중 최선)은 0.51/63.4%라 아직 갭 있음 - 남은 갭은
-    간단한 재정렬 규칙으로는 못 메웠고(트래킹도 실패) 파인튜닝이 필요한 영역으로 보임.
+    실라벨 9085프레임(150 train/50 val 영상, 리키지 방지 위해 영상 단위 분할)으로
+    score*area 규칙과 비교: mean IoU 0.315->0.334, 적중률 35.9%->38.3% (held-out).
+    작지만 실측 개선이라 기본값으로 채택. 파일 없으면 None -> score*area로 폴백.
     """
-    x = transform(torch.from_numpy(frame).permute(2, 0, 1))
-    out = model([x])[0]
-    best, best_key = None, -1.0
-    for box, label, score in zip(out["boxes"], out["labels"], out["scores"]):
-        if score < SCORE_THR or categories[label] not in VEHICLE_CLASSES:
-            continue
-        x0, y0, x1, y1 = box.tolist()
-        key = float(score) * (x1 - x0) * (y1 - y0)
-        if key > best_key:
-            best, best_key = (x0, y0, x1, y1, float(score)), key
-    return best
+    path = Path(path) if path else ROOT / "model" / "stage2" / "reranker.pt"
+    if not path.exists():
+        return None
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    net = nn.Sequential(nn.Linear(len(ckpt["features"]), 16), nn.ReLU(), nn.Linear(16, 1))
+    net.load_state_dict(ckpt["state_dict"])
+    net.eval()
+    return net, ckpt["mean"], ckpt["std"]
+
+
+def _rerank_features(c, w, h):
+    x0, y0, x1, y1, score = c[:5]
+    cx, cy = (x0 + x1) / 2 / w, (y0 + y1) / 2 / h
+    bw, bh = (x1 - x0) / w, (y1 - y0) / h
+    return [cx, cy, bw, bh, score, bw / (bh + 1e-6)]
+
+
+def detect_vehicles(model, transform, categories, frame: np.ndarray, reranker=None):
+    """frame(RGB) 안에서 '상대차량'으로 볼 박스 하나 반환: (x0,y0,x1,y1,score) or None.
+
+    reranker가 주어지면 학습된 재정렬기로 후보 중 고르고(load_reranker() 참고),
+    없으면 score*area 최대 규칙으로 폴백(캐시 실험상 largest_area와 거의 동일 -
+    stage2_selection_search.py, 9085프레임 기준 0.337 vs 0.338, 유의미한 차이 아님).
+    """
+    candidates = detect_all_vehicles(model, transform, categories, frame, score_thr=SCORE_THR)
+    if not candidates:
+        return None
+    if reranker is not None:
+        net, mean, std = reranker
+        h, w = frame.shape[:2]
+        feats = torch.tensor([_rerank_features(c, w, h) for c in candidates], dtype=torch.float32)
+        with torch.inference_mode():
+            scores = net((feats - mean) / std).squeeze(-1)
+        return candidates[int(scores.argmax())]
+    return max(candidates, key=lambda c: c[4] * (c[2] - c[0]) * (c[3] - c[1]))
 
 
 @torch.inference_mode()
 def detect_all_vehicles(model, transform, categories, frame: np.ndarray, score_thr: float = 0.2):
-    """진단용: score_thr 이상인 모든 차량류 박스를 반환 (선택 규칙 없이 후보 전체)."""
+    """score_thr 이상인 모든 차량류 박스를 반환 (선택 규칙 없이 후보 전체)."""
     x = transform(torch.from_numpy(frame).permute(2, 0, 1))
     out = model([x])[0]
     candidates = []
@@ -134,14 +158,12 @@ def find_collision_frame(frames: list) -> int:
 
 
 # --------------------------------------------------------------------------- entry/evasion/side (라벨 없음, 휴리스틱)
-def find_entry_and_scene(model, transform, categories, frames: list, collision_frame: int):
+def find_entry_and_scene(model, transform, categories, frames: list, collision_frame: int, reranker=None):
     """collision_frame 이전 구간에서 상대차량이 처음 '크게' 잡히는 시점/방향, 충돌 직전 여유공간.
 
-    실라벨 진단: 최대박스 규칙 IoU 0.33/적중 39%, oracle(후보 중 최선) 0.51/63% - 규칙을
-    바꾸면 이론상 오를 여지가 있었으나 IoU 기반 그리디 트래킹(track_target_vehicle)으로
-    시도해보니 IoU 0.335/적중 39.0%로 사실상 동일했다(첫 프레임에서 틀리면 계속 그 차를
-    따라감). 그래서 다시 단순한 프레임별 최대박스로 되돌림 - 이득 없는 복잡성은 안 남긴다.
-    entry_side/evasion_space는 여전히 신뢰도 낮음, 다음 손볼 대상은 파인튜닝.
+    실라벨 9085프레임 기준: score*area(폴백) IoU~0.34, 학습 재정렬기(load_reranker) IoU 0.334
+    (held-out 영상 기준, 큰 표본에서 재확인) - 재정렬기가 근소하게 낫고 유일하게 실측
+    검증된 개선이라 기본 사용. entry_side/evasion_space는 여전히 신뢰도 낮음.
     """
     h, w = frames[0].shape[:2]
     window_lo = max(0, collision_frame - 30)
@@ -150,7 +172,7 @@ def find_entry_and_scene(model, transform, categories, frames: list, collision_f
     detections = {}
     entry_frame, entry_side = None, None
     for t in range(window_lo, window_hi + 1):
-        det = detect_vehicles(model, transform, categories, frames[t])
+        det = detect_vehicles(model, transform, categories, frames[t], reranker=reranker)
         if det is None:
             continue
         detections[t] = det
@@ -184,6 +206,8 @@ def find_entry_and_scene(model, transform, categories, frames: list, collision_f
 def main():
     print("loading COCO-pretrained detector ...", flush=True)
     model, transform, categories = load_detector()
+    reranker = load_reranker()
+    print(f"reranker: {'있음, 사용' if reranker else '없음(model/stage2/reranker.pt) - score*area로 폴백'}", flush=True)
 
     out = ROOT / "model" / "stage2"
     out.mkdir(parents=True, exist_ok=True)
@@ -194,7 +218,9 @@ def main():
     for row in labels.itertuples():
         frames = load_frames(DATA / "stage2" / row.path)
         pred_collision = find_collision_frame(frames)
-        entry_frame, entry_side, evasion, _, _ = find_entry_and_scene(model, transform, categories, frames, pred_collision)
+        entry_frame, entry_side, evasion, _, _ = find_entry_and_scene(
+            model, transform, categories, frames, pred_collision, reranker=reranker
+        )
         err = abs(pred_collision - row.t_collision)
         errors.append(err)
         print(f"{row.ID}: collision pred={pred_collision} true={row.t_collision} err={err} | "
