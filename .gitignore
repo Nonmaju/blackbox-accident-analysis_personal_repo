@@ -28,4 +28,4 @@ __pycache__/
 Thumbs.db
 
 # local run logs (scratch, not source)
-*_run.log
+*.log
