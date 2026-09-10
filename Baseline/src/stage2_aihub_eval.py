@@ -35,9 +35,19 @@ def iou(box_a, box_b):
     return inter / union if union > 0 else 0.0
 
 
+_B_LABELS_CACHE = ROOT / "data" / "_aihub_extract" / "b_labels_cache.json"
+
+
 def collect_b_labels():
-    """{video_file_name: [(frame_no, bbox_xyxy), ...]} — objectB(피해차량)만."""
+    """{video_file_name: [(frame_no, bbox_xyxy), ...]} — objectB(피해차량)만.
+
+    img_labels 아래 24만개+ json을 매번 훑으면 몇 분씩 걸려서 결과를 캐시한다.
+    """
     import json
+
+    if _B_LABELS_CACHE.exists():
+        raw = json.loads(_B_LABELS_CACHE.read_text(encoding="utf-8"))
+        return {k: [tuple(x) for x in v] for k, v in raw.items()}
 
     out = {}
     for jf in SAMPLE.glob("img_labels/*/*.json"):
@@ -47,6 +57,7 @@ def collect_b_labels():
                 out.setdefault(d["video_file_name"], []).append(
                     (d["sequence_frame_number"], xywh_to_xyxy(obj["bbox"]))
                 )
+    _B_LABELS_CACHE.write_text(json.dumps(out), encoding="utf-8")
     return out
 
 
