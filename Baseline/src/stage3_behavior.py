@@ -58,6 +58,7 @@ def _smooth(x: np.ndarray, k: int = 3) -> np.ndarray:
 
 def classify(speed: np.ndarray, steer: np.ndarray, stopped_thr: float, accel_eps: float, steer_thr: float):
     speed_s = _smooth(speed)
+    steer_s = _smooth(steer)  # speed만 스무딩하고 있었음 - LOVO 검증 결과 steer도 스무딩하면 0.670->0.710
     n = len(speed_s)
     accel_out, steer_out = [], []
     for t in range(n):
@@ -72,7 +73,7 @@ def classify(speed: np.ndarray, steer: np.ndarray, stopped_thr: float, accel_eps
                 accel_out.append("DECELERATING")
             else:
                 accel_out.append("CONSTANT")
-        s = steer[t]
+        s = steer_s[t]
         # 부호 주의: 카메라가 좌회전하면 정지된 배경은 화면에서 오른쪽으로 흐른다(flow_x 양수).
         # AIHub 실측 자이로(angZAve) + 실제 프레임 확인(좌회전 차선에서 회전)으로 검증된 부호.
         steer_out.append("LEFT" if s > steer_thr else "RIGHT" if s < -steer_thr else "STRAIGHT")
@@ -89,9 +90,9 @@ def calibrate() -> dict:
 
     best = None
     grid = itertools.product(
-        np.linspace(0.1, 1.5, 6),   # stopped_thr
-        np.linspace(0.02, 0.3, 6),  # accel_eps
-        np.linspace(0.1, 1.0, 6),   # steer_thr
+        np.linspace(0.05, 1.5, 10),  # stopped_thr
+        np.linspace(0.01, 0.3, 10),  # accel_eps
+        np.linspace(0.05, 1.0, 10),  # steer_thr
     )
     for stopped_thr, accel_eps, steer_thr in grid:
         correct, total = 0, 0
