@@ -31,7 +31,9 @@ from video_io import load_frames
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
 VEHICLE_CLASSES = {"car", "motorcycle", "bus", "truck"}
-SCORE_THR = 0.5
+SCORE_THR = 0.2  # 0.5->0.2: 358영상/16248프레임 캐시로 검증(mean IoU 0.378->0.442, 히트율 45.2%->53.1%,
+# 0.2 밑으로는 수확체감이라 여기서 멈춤). 재정렬기가 후보 많아질수록 진짜 정답 박스가
+# 후보군에 남아있을 확률이 올라가서 선택 여지가 커지는 것으로 보임.
 RERANK_FEATURES = ["cx", "cy", "bw", "bh", "score", "aspect"]
 
 
