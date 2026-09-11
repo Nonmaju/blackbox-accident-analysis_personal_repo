@@ -13,6 +13,15 @@
 숨은 기준과 정확히 같으리라는 보장은 없다(팀 문서의 A2 가설과 동일한 위험). 그래도
 공개 50개보다는 훨씬 크고 실측 물리량 기반이라, 이 결과가 기존 50샘플 보정과
 방향이 일치하는지가 핵심 확인 포인트.
+
+초판은 두 가지로 망가져 있었다(둘 다 수정 완료, stage3_can_candidate.py 참고):
+  1. 부호 반대 가정(양수=LEFT) - 실제는 음수=LEFT(stage3_aihub_eval 상관계수로 검증됨).
+  2. 자이로 원시값 글리치(최대 53467, 정상은 수십)를 clip()으로 경계에 뭉갰더니 분위수
+     계산이 왜곡됨 - 완전히 제외(전방채움)로 수정. 영상별이 아니라 전체 풀링으로 임계값을
+     한 번만 계산하도록도 바꿈(영상별 계산은 개별 영상의 편향된 회전 분포에 휘둘렸음).
+수정 후 LOVO 평균 0.687(랜덤 아님, 35982프레임/10영상). 공개 50샘플 교차검증은 0.55로
+현재 프로덕션(0.71)보다 낮지만, 공개 50샘플 자체가 실제 DACON 성능과 무관하다는 게 이미
+여러 번 확인돼서 이 격차가 "CAN 후보가 나쁘다"를 의미하진 않음 - 실제 검증은 제출로만 가능.
 """
 from __future__ import annotations
 
@@ -77,30 +86,60 @@ def classify(speed, steer, stopped_thr, accel_eps, steer_thr):
     return accel_out, steer_out
 
 
-def build_can_labels(real_speed, real_yaw):
-    """분위수 기반 accel/steer '실측 유래' 라벨. 공개 50샘플 클래스 비율에 근사."""
-    speed_s = _smooth(real_speed, k=5)
-    stopped_q = np.quantile(speed_s, 0.06)  # 공개: STOPPED ~6%
-    slope = np.array([speed_s[min(i + 3, len(speed_s) - 1)] - speed_s[max(i - 3, 0)] for i in range(len(speed_s))])
-    acc_hi = np.quantile(slope, 0.82)   # 상위 18% = ACCELERATING
-    acc_lo = np.quantile(slope, 0.16)   # 하위 16% = DECELERATING
+GLITCH_MAX = 150  # 물리적으로 가능한 최대 yaw rate(deg/s) 근사 - 넘으면 센서 글리치로 간주
 
+
+def clean_yaw(real_yaw):
+    """글리치(|yaw|>GLITCH_MAX, 최대 53467까지 관측됨) 제외 후 전방채움 + 스무딩.
+    clip()으로 경계에 뭉개면 분위수 계산이 깨진다(이전 버전 버그) - 완전히 제외해야 함."""
+    valid = np.abs(real_yaw) <= GLITCH_MAX
+    yaw = real_yaw.copy().astype(np.float64)
+    last = 0.0
+    for i in range(len(yaw)):
+        if valid[i]:
+            last = yaw[i]
+        else:
+            yaw[i] = last  # 글리치 지점은 직전 유효값 유지
+    return _smooth(yaw, k=5)
+
+
+def compute_thresholds(cache):
+    """전체 영상 풀링(pooled)으로 임계값 한 번만 계산 - 영상별로 따로 계산하면 개별 영상의
+    편향된 회전 분포(예: 한쪽으로만 도는 경로)에 휘둘림(이전 버전 버그, 한 영상이 77% LEFT로 나옴)."""
+    all_speed = np.concatenate([_smooth(v["real_speed"], k=5) for v in cache.values()])
+    stopped_q = np.quantile(all_speed, 0.06)
+    all_slope = np.concatenate([
+        np.array([_smooth(v["real_speed"], k=5)[min(i + 3, len(v["real_speed"]) - 1)]
+                  - _smooth(v["real_speed"], k=5)[max(i - 3, 0)] for i in range(len(v["real_speed"]))])
+        for v in cache.values()
+    ])
+    acc_hi = np.quantile(all_slope, 0.82)
+    acc_lo = np.quantile(all_slope, 0.16)
+    all_yaw_c = np.concatenate([clean_yaw(v["real_yaw"]) for v in cache.values()])
+    # 부호: 음수=LEFT, 양수=RIGHT (stage3_aihub_eval의 실측 상관계수로 검증된 부호 - 이전
+    # 버전은 이게 반대였음). 공개 50샘플 비율(LEFT~12%, RIGHT~10%)에 맞춰 분위수 선택.
+    right_q = np.quantile(all_yaw_c, 0.90)
+    left_q = np.quantile(all_yaw_c, 0.12)
+    return {"stopped_q": stopped_q, "acc_hi": acc_hi, "acc_lo": acc_lo, "right_q": right_q, "left_q": left_q}
+
+
+def build_can_labels(real_speed, real_yaw, thr):
+    """thr = compute_thresholds(cache)의 pooled 임계값. 실측 유래 accel/steer 라벨."""
+    speed_s = _smooth(real_speed, k=5)
+    slope = np.array([speed_s[min(i + 3, len(speed_s) - 1)] - speed_s[max(i - 3, 0)] for i in range(len(speed_s))])
     accel_labels = []
     for i in range(len(speed_s)):
-        if speed_s[i] <= stopped_q:
+        if speed_s[i] <= thr["stopped_q"]:
             accel_labels.append("STOPPED")
-        elif slope[i] >= acc_hi:
+        elif slope[i] >= thr["acc_hi"]:
             accel_labels.append("ACCELERATING")
-        elif slope[i] <= acc_lo:
+        elif slope[i] <= thr["acc_lo"]:
             accel_labels.append("DECELERATING")
         else:
             accel_labels.append("CONSTANT")
 
-    yaw_s = np.clip(real_yaw, -200, 200)  # 명백한 센서 글리치(수천대) 제거
-    yaw_s = _smooth(yaw_s, k=5)
-    left_q = np.quantile(yaw_s, 0.88)   # 공개: LEFT ~12%
-    right_q = np.quantile(yaw_s, 0.10)  # 공개: RIGHT ~10%
-    steer_labels = ["LEFT" if v >= left_q else "RIGHT" if v <= right_q else "STRAIGHT" for v in yaw_s]
+    yaw_c = clean_yaw(real_yaw)
+    steer_labels = ["RIGHT" if v >= thr["right_q"] else "LEFT" if v <= thr["left_q"] else "STRAIGHT" for v in yaw_c]
     return accel_labels, steer_labels
 
 
@@ -132,10 +171,13 @@ def main():
         np.savez(CACHE, cache=cache)
         print(f"캐시 저장: {CACHE}")
 
-    # 영상별 실측 라벨 생성
+    # pooled 임계값 한 번만 계산(영상별로 따로 하면 개별 영상의 회전 편향에 휘둘림 - 이전 버그)
+    thr = compute_thresholds(cache)
+    print(f"pooled 임계값: {thr}")
+
     per_video = {}
     for k, v in cache.items():
-        accel_labels, steer_labels = build_can_labels(v["real_speed"], v["real_yaw"])
+        accel_labels, steer_labels = build_can_labels(v["real_speed"], v["real_yaw"], thr)
         per_video[k] = {"flow_speed": v["flow_speed"], "flow_steer": v["flow_steer"],
                          "accel": accel_labels, "steer": steer_labels}
 
