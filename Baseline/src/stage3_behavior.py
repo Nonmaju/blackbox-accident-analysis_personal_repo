@@ -90,9 +90,9 @@ def calibrate() -> dict:
 
     best = None
     grid = itertools.product(
-        np.linspace(0.05, 1.5, 10),  # stopped_thr
-        np.linspace(0.01, 0.3, 10),  # accel_eps
-        np.linspace(0.05, 1.0, 10),  # steer_thr
+        np.linspace(0.1, 1.5, 6),   # stopped_thr - 그리드 넓힌 버전이 LOVO에서도 더 나빴음(과적합), 원복
+        np.linspace(0.02, 0.3, 6),  # accel_eps
+        np.linspace(0.1, 1.0, 6),   # steer_thr
     )
     for stopped_thr, accel_eps, steer_thr in grid:
         correct, total = 0, 0
