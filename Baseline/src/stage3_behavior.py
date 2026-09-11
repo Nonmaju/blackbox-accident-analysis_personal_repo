@@ -57,8 +57,13 @@ def _smooth(x: np.ndarray, k: int = 3) -> np.ndarray:
 
 
 def classify(speed: np.ndarray, steer: np.ndarray, stopped_thr: float, accel_eps: float, steer_thr: float):
+    # steer 스무딩을 추가했다가(LOVO 0.670->0.710, 공개 50샘플 기준) 실제 제출 점수가
+    # 0.521->0.48->0.47로 계속 떨어져서 원복. Macro-F1 공식(0.7*accel+0.3*steer, STOPPED
+    # 제외)으로 다시 그리드서치해도 스무딩 여부와 무관하게 같은 임계값이 최적이라, 스무딩
+    # 자체의 문제라기보다 "공개 5비디오 로컬 검증이 실제 숨은 평가셋과 거의 무관하다"는
+    # 구조적 한계로 보임(팀장님도 반대 방향으로 동일 현상: 로컬 나빠졌는데 실제 Stage2는
+    # 올랐음 - 팀 이슈 #10 참고). 실측 검증된 유일한 상태(0.521)로 되돌림.
     speed_s = _smooth(speed)
-    steer_s = _smooth(steer)  # speed만 스무딩하고 있었음 - LOVO 검증 결과 steer도 스무딩하면 0.670->0.710
     n = len(speed_s)
     accel_out, steer_out = [], []
     for t in range(n):
@@ -73,7 +78,7 @@ def classify(speed: np.ndarray, steer: np.ndarray, stopped_thr: float, accel_eps
                 accel_out.append("DECELERATING")
             else:
                 accel_out.append("CONSTANT")
-        s = steer_s[t]
+        s = steer[t]
         # 부호 주의: 카메라가 좌회전하면 정지된 배경은 화면에서 오른쪽으로 흐른다(flow_x 양수).
         # AIHub 실측 자이로(angZAve) + 실제 프레임 확인(좌회전 차선에서 회전)으로 검증된 부호.
         steer_out.append("LEFT" if s > steer_thr else "RIGHT" if s < -steer_thr else "STRAIGHT")
