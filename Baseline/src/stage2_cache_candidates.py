@@ -12,7 +12,8 @@ from stage2_incident import detect_all_vehicles, load_detector
 from video_io import load_frames
 
 OUT = Path(__file__).resolve().parents[1] / "data" / "_aihub_extract" / "stage2_candidates_cache.json"
-MAX_VIDEOS = 200  # 전부 돌리면 너무 오래 걸려서 표본만
+MAX_VIDEOS = 600  # 200->600(사실상 전부, 보유 554개) - 재정렬기 4-fold 검증에서 더 큰 표본이
+# 유의미하게 나을 가능성 확인(재정렬기는 학습형이라 데이터 늘면 실제로 좋아진 전례 있음)
 
 
 def main():
