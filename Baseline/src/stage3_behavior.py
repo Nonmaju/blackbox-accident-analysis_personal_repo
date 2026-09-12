@@ -79,7 +79,12 @@ def classify(speed: np.ndarray, steer: np.ndarray, quality: np.ndarray, stopped_
             accel_out.append("STOPPED")
         else:
             lo, hi = max(0, t - 3), min(n, t + 4)
-            slope = speed_s[hi - 1] - speed_s[lo] if hi - 1 > lo else 0.0
+            width = (hi - 1) - lo  # 정상적으로는 6(±3프레임) - 영상 맨 앞/뒤에서만 좁아짐
+            # 윈도우가 좁아지는 시작/끝 3프레임 구간에서도 6프레임짜리와 같은 단위가 되도록
+            # 스케일 보정(팀원 정민 submit-3의 dt 정규화 아이디어를 그대로 쓰지 않고, 기존
+            # accel_eps 보정값과 호환되게 "6프레임 환산"으로 구현 - 중간 프레임은 100% 동일,
+            # 가장자리 몇 프레임만 편향 제거).
+            slope = (speed_s[hi - 1] - speed_s[lo]) * (6 / width) if width > 0 else 0.0
             if slope > accel_eps:
                 accel_out.append("ACCELERATING")
             elif slope < -accel_eps:
