@@ -152,11 +152,19 @@ def motion_energy(frames: list) -> np.ndarray:
 
 
 def find_collision_frame(frames: list) -> int:
+    # 시작부만 고정 8프레임 제외, 끝은 제외 안 함: CCD(801개 자차관여 실측)로 재보정.
+    # 원래(비율 기반 margin=10%, 시작+끝 둘 다 제외)는 사고 클립 특성상 문제 있었음 -
+    # 충돌이 늘 뒷부분(50프레임 중 30~49, 최솟값이 30!)이라 끝 10% 제외가 늦게 발생한
+    # 진짜 충돌을 통째로 못 찾게 막았음. 비율 기반 margin=0(끝 제외 없음)도 시도했지만
+    # DACON 공개 5샘플 중 하나(자차 무관 배경사고 영상)에서 초반 카메라 흔들림을
+    # 충돌로 오검출(MAE 2.40->6.40). 영상 길이에 비례하는 "비율"보다 "고정 프레임 수"가
+    # 더 타당하다고 보고(카메라 흔들림은 영상 길이와 무관하게 일정 시간) 시작 8프레임만
+    # 고정 제외 + 끝 제외 없음으로 재시도: CCD 기준 MAE 6.22(최선), within±3 50.9%,
+    # 공개 5샘플에서도 오검출 없음(stage2_ccd_calibrate_margin2.py로 그리드서치).
     energy = motion_energy(frames)
-    # 시작/끝 근처 튐(카메라 켜짐/영상 끝)은 충돌일 가능성이 낮으니 제외
-    margin = max(1, len(energy) // 10)
-    window = energy[margin:-margin] if len(energy) > 2 * margin else energy
-    return int(np.argmax(window)) + margin
+    start_exclude = min(8, max(0, len(energy) - 1))
+    window = energy[start_exclude:]
+    return int(np.argmax(window)) + start_exclude
 
 
 # --------------------------------------------------------------------------- ego-lane (entry_frame 재정의용)
@@ -268,13 +276,16 @@ def find_entry_and_scene(model, transform, categories, frames: list, collision_f
     근접촬영이 많아 차선이 거의 수평이거나 표시가 흐림, talkboard 417288 참고)
     _default_lane()(자차 중앙, 차선폭 화면폭의 38% 가정)을 써서 "차선 진입" 개념 자체는
     검출 성패와 무관하게 유지한다(area_frac은 정의 자체가 다른 값이라 폴백으로도 안 씀).
-    entry_side/evasion_space는 이번 변경에서 안 건드림(레버 하나씩 바꿔야 다음 제출에서
-    뭐가 통했는지 구분 가능).
 
     검색 구간을 collision_frame-30에서 -90으로 넓히고(entry가 area 기준보다 훨씬 이른
     프레임에서 걸릴 수 있어서), 못 찾으면 collision_frame이 아니라 window_lo로 폴백
     (talkboard 417277: "영상 시작 이전에 이미 진입했다면 첫 프레임을 제출" - window_lo가
     0이면 정확히 이 규칙과 일치).
+
+    evasion_space: 공식 정의(talkboard 417319 - "자차가 진행방향을 바꿔 피할 수 있는
+    물리적 공간")에 맞춰 상대차량 박스 좌우 여백(자차와 무관한 기준이었음) 대신 자차
+    차선 경계 바로 옆 인접공간의 차량 점유 여부로 교체(_evasion_space_from_lane).
+    entry_side는 이번 변경에서 안 건드림.
     """
     h, w = frames[0].shape[:2]
     window_lo = max(0, collision_frame - 90)
@@ -310,11 +321,35 @@ def find_entry_and_scene(model, transform, categories, frames: list, collision_f
     collision_box_frame, collision_box = None, None
     if box_at_collision is not None:
         collision_box_frame, collision_box = nearest_t, box_at_collision
-        x0, y0, x1, y1, score = box_at_collision
-        free_left, free_right = x0, w - x1
-        evasion_space = int(max(free_left, free_right) > 0.15 * w)
+        _, y0, _, y1, _ = box_at_collision
+        evasion_space = _evasion_space_from_lane(
+            frames[nearest_t], lane, model, transform, categories, y_ref=y1, w=w
+        )
 
     return entry_frame, entry_side, evasion_space, collision_box_frame, collision_box
+
+
+def _evasion_space_from_lane(frame, lane, model, transform, categories, y_ref: float, w: float) -> int:
+    """회피공간 공식 정의(talkboard 417319): "충돌 시점 기준 피의차량(자차)이 진행
+    방향을 바꿔 충돌을 피할 수 있는 물리적 공간"이 있는지 - 상대차량 박스 좌우 여백
+    (이전 방식, 자차와 무관한 기준)이 아니라 **자차 차선 경계 바로 옆**에 다른 차량이
+    없는 인접 공간이 있는지로 판단한다.
+
+    한계: 반대차선/보도 등 "현실적으로 회피 경로가 아닌 공간"을 구분할 도로 정보가
+    없어서, 화면 가장자리에 너무 붙은 경우만 배제하는 거친 근사다. 정량 검증 불가
+    (라벨 없음, 눈검증만 가능) - 이전 방식과 마찬가지로 신뢰도 낮은 휴리스틱."""
+    lx, rx = _lane_x_at(lane[0], y_ref), _lane_x_at(lane[1], y_ref)
+    if lx > rx:
+        lx, rx = rx, lx
+    lane_w = max(rx - lx, 1.0)
+    others = detect_all_vehicles(model, transform, categories, frame, score_thr=SCORE_THR)
+
+    def occupied(x0, x1):
+        return any(not (c[2] < x0 or c[0] > x1) for c in others)
+
+    left_clear = lx > 0.05 * w and not occupied(max(0.0, lx - lane_w), lx)
+    right_clear = rx < 0.95 * w and not occupied(rx, min(w, rx + lane_w))
+    return int(left_clear or right_clear)
 
 
 # --------------------------------------------------------------------------- calibration / self-check
