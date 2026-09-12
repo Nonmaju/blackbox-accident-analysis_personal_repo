@@ -180,7 +180,10 @@ def find_entry_and_scene(model, transform, categories, frames: list, collision_f
         detections[t] = det
         x0, y0, x1, y1, score = det
         area_frac = (x1 - x0) * (y1 - y0) / (w * h)
-        if entry_frame is None and t <= collision_frame and area_frac > 0.03:  # 화면의 3% 이상 = '진입'으로 간주
+        # 0.03->0.01: AIHub 실측 ObjectB 궤적(358영상) 검증 - 문턱 낮출수록 실측 진입
+        # 프레임과의 lag가 계속 줄어듦(0.03: median lag 1.0/mean 15.4 -> 0.01: median
+        # 0.0/mean 6.7). 너무 낮추면(<=0.005) '한 번도 못 넘는' 영상이 늘어 보수적으로 0.01 채택.
+        if entry_frame is None and t <= collision_frame and area_frac > 0.01:
             entry_frame = t
             entry_side = "LEFT" if (x0 + x1) / 2 < w / 2 else "RIGHT"
 
