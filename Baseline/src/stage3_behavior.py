@@ -29,8 +29,11 @@ FLOW_SIZE = (160, 90)  # (w, h) — 다운스케일해서 Farneback 속도 확�
 
 
 # --------------------------------------------------------------------------- optical flow features
-def compute_flow_series(frames: list) -> tuple[np.ndarray, np.ndarray]:
-    """0.1초(=2프레임) 간격의 (전방속도 proxy, 좌우편향 proxy) 시계열을 반환."""
+QUALITY_THR = 2.0  # Laplacian variance - 이보다 낮으면 거의 단색/블러라 flow를 못 믿음(팀원 정민 submit-3 참고)
+
+
+def compute_flow_series(frames: list) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """0.1초(=2프레임) 간격의 (전방속도 proxy, 좌우편향 proxy, 화질 quality) 시계열을 반환."""
     small = [cv2.resize(cv2.cvtColor(f, cv2.COLOR_RGB2GRAY), FLOW_SIZE) for f in frames]
     n = len(small) // 2
     w, h = FLOW_SIZE
@@ -39,6 +42,7 @@ def compute_flow_series(frames: list) -> tuple[np.ndarray, np.ndarray]:
 
     speed = np.zeros(n, dtype=np.float32)
     steer = np.zeros(n, dtype=np.float32)
+    quality = np.zeros(n, dtype=np.float32)
     for t in range(n):
         i0 = min(2 * t, len(small) - 3)
         i1 = i0 + 2
@@ -46,17 +50,21 @@ def compute_flow_series(frames: list) -> tuple[np.ndarray, np.ndarray]:
         mag = np.sqrt(flow[..., 0] ** 2 + flow[..., 1] ** 2)
         speed[t] = float(np.median(mag[road]))
         steer[t] = float(np.median(flow[horizon, :, 0]))
-    return speed, steer
+        quality[t] = float(cv2.Laplacian(small[i1], cv2.CV_32F).var())
+    return speed, steer, quality
 
 
 def _smooth(x: np.ndarray, k: int = 3) -> np.ndarray:
+    # 평균(박스) 대신 중앙값 슬라이딩 윈도우 - 이상치 스파이크에 강함(팀원 정민 submit-3
+    # 참고, 공개 50라벨 acc 0.550->0.570로 확인된 개선, 물리량은 안 바꿔서 재보정 불필요).
     if len(x) < 2 * k + 1:
         return x
-    kernel = np.ones(2 * k + 1) / (2 * k + 1)
-    return np.convolve(x, kernel, mode="same")
+    width = 2 * k + 1
+    padded = np.pad(x, (k, k), mode="edge")
+    return np.median(np.lib.stride_tricks.sliding_window_view(padded, width), axis=-1)
 
 
-def classify(speed: np.ndarray, steer: np.ndarray, stopped_thr: float, accel_eps: float, steer_thr: float):
+def classify(speed: np.ndarray, steer: np.ndarray, quality: np.ndarray, stopped_thr: float, accel_eps: float, steer_thr: float):
     # steer 스무딩을 추가했다가(LOVO 0.670->0.710, 공개 50샘플 기준) 실제 제출 점수가
     # 0.521->0.48->0.47로 계속 떨어져서 원복. Macro-F1 공식(0.7*accel+0.3*steer, STOPPED
     # 제외)으로 다시 그리드서치해도 스무딩 여부와 무관하게 같은 임계값이 최적이라, 스무딩
@@ -82,6 +90,9 @@ def classify(speed: np.ndarray, steer: np.ndarray, stopped_thr: float, accel_eps
         # 부호 주의: 카메라가 좌회전하면 정지된 배경은 화면에서 오른쪽으로 흐른다(flow_x 양수).
         # AIHub 실측 자이로(angZAve) + 실제 프레임 확인(좌회전 차선에서 회전)으로 검증된 부호.
         steer_out.append("LEFT" if s > steer_thr else "RIGHT" if s < -steer_thr else "STRAIGHT")
+        # 텍스처 게이트: 거의 단색/블러 프레임은 flow를 못 믿음(팀원 정민 submit-3 참고).
+        if quality[t] < QUALITY_THR:
+            accel_out[-1], steer_out[-1] = "CONSTANT", "STRAIGHT"
     return accel_out, steer_out
 
 
@@ -101,8 +112,8 @@ def calibrate() -> dict:
     )
     for stopped_thr, accel_eps, steer_thr in grid:
         correct, total = 0, 0
-        for vid_id, ((speed, steer), group) in cache.items():
-            accel_pred, steer_pred = classify(speed, steer, stopped_thr, accel_eps, steer_thr)
+        for vid_id, ((speed, steer, quality), group) in cache.items():
+            accel_pred, steer_pred = classify(speed, steer, quality, stopped_thr, accel_eps, steer_thr)
             for row in group.itertuples():
                 idx = min(row.sample_index, len(accel_pred) - 1)
                 total += 2
