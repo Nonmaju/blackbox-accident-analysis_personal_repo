@@ -159,36 +159,146 @@ def find_collision_frame(frames: list) -> int:
     return int(np.argmax(window)) + margin
 
 
+# --------------------------------------------------------------------------- ego-lane (entry_frame 재정의용)
+def _fit_lane_side(points):
+    """차선은 화면상 거의 수직이라 x=m*y+b로 피팅(수직선에서도 안정적). 표본 2개 미만/
+    y분산 거의 0이면 못 믿을 피팅이라 None."""
+    if len(points) < 2:
+        return None
+    ys = np.array([p[1] for p in points], dtype=np.float64)
+    xs = np.array([p[0] for p in points], dtype=np.float64)
+    if ys.std() < 1e-3:
+        return None
+    m, b = np.polyfit(ys, xs, 1)
+    return float(m), float(b)
+
+
+def detect_lane_boundaries(frame: np.ndarray):
+    """한 프레임에서 자차 차선 좌/우 경계선 근사: 도로 원근에 맞춘 사다리꼴 ROI로
+    건물/보도 경계 등 도로 밖 직선을 배제하고, Canny+HoughLinesP로 거의 수평인 선
+    (차선 아님)을 버린 뒤 기울기 부호로 좌/우 분리해 각각 x=m*y+b로 피팅.
+    실패(선 없음/한쪽만 검출)하면 None - 호출부가 _default_lane()으로 넘어감.
+
+    ponytail: 학습 없는 고전 CV(Hough) - 라벨이 없어 정량 검증 불가, 눈검증만 가능.
+    실제 눈검증 결과 DACON 공개 5샘플 전부에서 실패함(사거리/근접 촬영이라 차선이
+    거의 수평으로 보이거나 표시 자체가 흐림 - 포럼에서도 같은 문제 제기됨, talkboard
+    417288). 그래도 실패시 area_frac이 아니라 _default_lane()(자차가 차선 중앙에
+    있다고 가정한 고정 사다리꼴)으로 넘어가게 해서, 검출 성패와 무관하게 "차선 진입"
+    개념 자체는 항상 유지한다 - area_frac 폴백은 정의 자체가 다른 값이라 완전히 버림.
+    """
+    h, w = frame.shape[:2]
+    roi_top = int(h * 0.7)  # 화면 하단 30%만 본다 - 이보다 멀면 차선이 거의 수평이 돼서
+    # 기울기로 차선/노면표시를 구분할 수가 없음(원근 문제, 실측으로 확인)
+    mask = np.zeros((h, w), dtype=np.uint8)
+    trapezoid = np.array([
+        [0, h], [int(w * 0.3), roi_top],
+        [int(w * 0.7), roi_top], [w, h],
+    ])
+    cv2.fillPoly(mask, [trapezoid], 255)
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+    edges = cv2.bitwise_and(cv2.Canny(gray, 50, 150), mask)
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=25, minLineLength=int(h * 0.08), maxLineGap=30)
+    if lines is None:
+        return None
+
+    left_pts, right_pts = [], []
+    for x1, y1, x2, y2 in lines.reshape(-1, 4):
+        if x2 == x1:
+            continue
+        slope = (y2 - y1) / (x2 - x1)
+        if abs(slope) < 0.4:  # 수평에 가까운 선 제외
+            continue
+        (left_pts if slope < 0 else right_pts).extend([(x1, y1), (x2, y2)])
+
+    left, right = _fit_lane_side(left_pts), _fit_lane_side(right_pts)
+    if left is None or right is None:
+        return None
+    return left, right  # 각각 (m, b): x = m*y + b
+
+
+def _default_lane(h: int, w: int):
+    """차선 검출 실패시 기본값 - 자차가 차선 중앙에 있고 차선폭이 화면 하단 기준
+    38%라고 가정(편도 2~3차로 도로에서 흔한 비율), 화면 중앙 상단(소실점 근사)으로
+    수렴하는 사다리꼴. 실제 카메라 장착/도로폭에 따라 달라질 수 있는 거친 근사지만,
+    area_frac(화면 면적)보다는 "차선 안에 있는지"라는 정의에 훨씬 가깝다."""
+    half = 0.19 * w
+    left = tuple(np.polyfit([h, 0], [w / 2 - half, w / 2], 1))
+    right = tuple(np.polyfit([h, 0], [w / 2 + half, w / 2], 1))
+    return left, right
+
+
+def estimate_ego_lane(frames: list, ts, h: int, w: int):
+    """검색 구간 프레임들에서 차선을 각각 검출 후 중앙값으로 대표 경계선 산출
+    (한 프레임 오검출에 흔들리지 않게). 유효 표본이 1/4 미만이면 _default_lane()."""
+    ts = list(ts)
+    lefts, rights = [], []
+    for t in ts:
+        fit = detect_lane_boundaries(frames[t])
+        if fit is None:
+            continue
+        lefts.append(fit[0])
+        rights.append(fit[1])
+    if len(lefts) < max(2, len(ts) // 4):
+        return _default_lane(h, w)
+    return tuple(np.median(lefts, axis=0)), tuple(np.median(rights, axis=0))
+
+
+def _lane_x_at(line, y):
+    m, b = line
+    return m * y + b
+
+
+def _crosses_into_lane(box, lane):
+    """박스 하단(바퀴 접지 근사)이 차선 경계 구간과 조금이라도 겹치면 진입으로 판단."""
+    x0, _, x1, y1 = box[:4]
+    lx, rx = _lane_x_at(lane[0], y1), _lane_x_at(lane[1], y1)
+    if lx > rx:
+        lx, rx = rx, lx
+    return x1 > lx and x0 < rx
+
+
 # --------------------------------------------------------------------------- entry/evasion/side (라벨 없음, 휴리스틱)
 def find_entry_and_scene(model, transform, categories, frames: list, collision_frame: int, reranker=None):
-    """collision_frame 이전 구간에서 상대차량이 처음 '크게' 잡히는 시점/방향, 충돌 직전 여유공간.
+    """상대차량이 자차 차선에 처음 '진입'하는 시점/방향, 충돌 직전 여유공간.
 
-    실라벨 9085프레임 기준: score*area(폴백) IoU~0.34, 학습 재정렬기(load_reranker) IoU 0.334
-    (held-out 영상 기준, 큰 표본에서 재확인) - 재정렬기가 근소하게 낫고 유일하게 실측
-    검증된 개선이라 기본 사용. entry_side/evasion_space는 여전히 신뢰도 낮음.
+    entry_frame: 대회 공식 정의("피해차량 바퀴가 피의차량 차선에 최초로 닿는 시점", talkboard
+    417186/417277)에 맞춰 화면 면적(area_frac) 프록시를 완전히 버리고 차선 추정 기반으로
+    교체. Hough 검출이 성공하면 그 값을, 실패하면(DACON 공개 5샘플 전부 실패 - 사거리/
+    근접촬영이 많아 차선이 거의 수평이거나 표시가 흐림, talkboard 417288 참고)
+    _default_lane()(자차 중앙, 차선폭 화면폭의 38% 가정)을 써서 "차선 진입" 개념 자체는
+    검출 성패와 무관하게 유지한다(area_frac은 정의 자체가 다른 값이라 폴백으로도 안 씀).
+    entry_side/evasion_space는 이번 변경에서 안 건드림(레버 하나씩 바꿔야 다음 제출에서
+    뭐가 통했는지 구분 가능).
+
+    검색 구간을 collision_frame-30에서 -90으로 넓히고(entry가 area 기준보다 훨씬 이른
+    프레임에서 걸릴 수 있어서), 못 찾으면 collision_frame이 아니라 window_lo로 폴백
+    (talkboard 417277: "영상 시작 이전에 이미 진입했다면 첫 프레임을 제출" - window_lo가
+    0이면 정확히 이 규칙과 일치).
     """
     h, w = frames[0].shape[:2]
-    window_lo = max(0, collision_frame - 30)
+    window_lo = max(0, collision_frame - 90)
     window_hi = min(len(frames) - 1, collision_frame + 5)  # 충돌 직후 몇 프레임도 봐야 근접탐지 fallback 가능
 
     detections = {}
-    entry_frame, entry_side = None, None
     for t in range(window_lo, window_hi + 1):
         det = detect_vehicles(model, transform, categories, frames[t], reranker=reranker)
-        if det is None:
-            continue
-        detections[t] = det
-        x0, y0, x1, y1, score = det
-        area_frac = (x1 - x0) * (y1 - y0) / (w * h)
-        # 0.03->0.01: AIHub 실측 ObjectB 궤적(358영상) 검증 - 문턱 낮출수록 실측 진입
-        # 프레임과의 lag가 계속 줄어듦(0.03: median lag 1.0/mean 15.4 -> 0.01: median
-        # 0.0/mean 6.7). 너무 낮추면(<=0.005) '한 번도 못 넘는' 영상이 늘어 보수적으로 0.01 채택.
-        if entry_frame is None and t <= collision_frame and area_frac > 0.01:
+        if det is not None:
+            detections[t] = det
+
+    lane = estimate_ego_lane(frames, detections.keys(), h, w) if detections else _default_lane(h, w)
+
+    entry_frame, entry_side = None, None
+    for t in sorted(t for t in detections if t <= collision_frame):
+        det = detections[t]
+        x0, _, x1, _, _ = det
+        if _crosses_into_lane(det, lane):
             entry_frame = t
             entry_side = "LEFT" if (x0 + x1) / 2 < w / 2 else "RIGHT"
+            break
 
-    if entry_frame is None:  # 못 찾으면 충돌 프레임 자체로 폴백
-        entry_frame, entry_side = collision_frame, "RIGHT"
+    if entry_frame is None:  # 못 찾으면 검색 구간 시작점으로 폴백(0이면 "시작 전 진입" 규칙과 일치)
+        entry_frame, entry_side = window_lo, "RIGHT"
 
     # 충돌 순간은 모션블러로 탐지가 자주 빠진다 — 가장 가까운 프레임의 박스로 대체(0으로 뭉개지 않게)
     box_at_collision = None
