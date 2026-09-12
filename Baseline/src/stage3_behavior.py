@@ -120,11 +120,14 @@ def calibrate() -> dict:
 
 
 def main():
-    params = calibrate()
+    # CAN 후보 테스트 적용 - 공개 50샘플 그리드서치(calibrate()) 대신 AIHub 실측 CAN
+    # (LOVO 0.687, stage3_can_candidate.py) 값을 그대로 저장. 이전 확정값(real 0.521)은
+    # stage3_can_candidate.CURRENT_PRODUCTION 참고, 되돌리려면 calibrate()를 다시 호출.
+    from stage3_can_candidate import CAN_CANDIDATE as params
     out = ROOT / "model" / "stage3"
     out.mkdir(parents=True, exist_ok=True)
     torch.save(params, out / "best.pt")
-    print(f"saved -> {out / 'best.pt'}")
+    print(f"CAN 후보 적용: {params} -> {out / 'best.pt'}")
 
 
 if __name__ == "__main__":
