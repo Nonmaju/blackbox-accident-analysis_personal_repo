@@ -1,0 +1,65 @@
+video_id,youtube_id,entry_frame,entry_side,evasion_space,review_status,notes
+001089,0127,38,LEFT,0,DONE,HIGH dark sedan crosses from left between deep snowbanks
+001495,0169,,,,SKIP,Truck side-swipe sequence begins before a defensible entry frame
+000917,0114,,,,SKIP,Collision target remains ahead without a clear lateral entry event
+001247,0151,,,,SKIP,Multiple nearby vehicles make the collision target and first entry ambiguous
+000907,0113,35,RIGHT,0,DONE,HIGH motorcycle enters from right on narrow roadside corridor
+001282,0154,,,,SKIP,Collision vehicle origin and first path entry are not visually defensible
+001500,0170,,,,SKIP,Late small target appears but exact first path entry is unresolved
+000884,0111,,,,SKIP,Loss-of-control sequence has no reliable LEFT or RIGHT entry event
+000218,0041,,,,SKIP,Multiple interacting vehicles make the ego collision target ambiguous
+000013,0017,,,,SKIP,Appears to show a third-party collision ahead rather than a clean ego-involved entry
+000826,0107,,,,SKIP,Oncoming narrow-road event has no defensible lateral entry direction
+000639,0072,26,LEFT,0,DONE,HIGH green sedan crosses from left; traffic and snow boundaries constrain escape
+001368,0160,30,LEFT,1,DONE,HIGH van merges from left with neighboring paved lanes
+001175,0140,34,RIGHT,0,DONE,MEDIUM collision car enters from right on snowy narrow road
+001156,0138,23,RIGHT,0,DONE,HIGH dark car crosses from right on icy narrow curve
+001258,0152,,,,SKIP,Several crossing vehicles make the actual collision target ambiguous
+001477,0167,,,,SKIP,Urban clutter and off-screen approach obscure the first target entry
+000196,0039,,,,SKIP,Rear-end style event with no LEFT or RIGHT entry
+000045,0025,,,,SKIP,Early and late interactions disagree on which vehicle is the collision target
+000169,0034,19,LEFT,0,DONE,HIGH van crosses from left on narrow wet two-lane road
+000005,0010,,,,SKIP,Collision target is already inside the ego path at frame zero
+001342,0158,,,,SKIP,Multi-vehicle pileup makes the ego collision target ambiguous
+001181,0141,29,LEFT,1,DONE,HIGH red SUV crosses from left in broad intersection
+001145,0137,,,,SKIP,Simultaneous vehicles from both sides obscure the collision target
+000189,0037,,,,SKIP,Multiple vehicles and possible third-party contact prevent a clean label
+000923,0116,25,RIGHT,1,DONE,HIGH SUV crosses from right with adjacent lane available
+001297,0156,,,,SKIP,Multiple sequential vehicles make the impact target uncertain
+001005,0123,24,RIGHT,1,DONE,HIGH SUV crosses from right in broad intersection
+000554,0067,33,RIGHT,0,DONE,HIGH white car enters from right on narrow residential road
+000767,0103,33,RIGHT,0,DONE,MEDIUM collision vehicle crosses from right amid adjacent traffic
+000174,0035,22,RIGHT,0,DONE,MEDIUM SUV enters from right; opposing bus and roadside constrain escape
+000881,0110,,,,SKIP,Rear-end style event with no defensible lateral entry
+000931,0117,21,LEFT,0,DONE,HIGH dark car crosses from left between snowbanks
+000732,0101,18,LEFT,0,DONE,HIGH truck crosses from left on narrow rural highway
+000230,0042,4,LEFT,0,DONE,MEDIUM sedan already beginning left-side entry; snowy narrow road
+000919,0115,23,LEFT,1,DONE,HIGH orange van crosses from left across multilane junction
+000516,0065,,,,SKIP,Rear-end style event with no LEFT or RIGHT entry
+001422,0163,32,LEFT,0,DONE,HIGH black car merges from left; snowbank borders remaining side
+001068,0126,31,LEFT,1,DONE,HIGH white sedan moves from left lane into ego path on multilane road
+000156,0033,20,LEFT,0,DONE,HIGH crossing car from left; roadside curb and traffic constrain escape
+000281,0047,3,RIGHT,0,DONE,HIGH SUV merges from right beside barrier and occupied lane
+000460,0061,27,LEFT,1,DONE,HIGH red car crosses from left in broad open intersection
+000029,0022,,,,SKIP,Complex sequence does not expose a single reliable lateral-entry collision target
+000249,0044,14,LEFT,0,DONE,HIGH red sedan crosses from left; parked cars and curb constrain escape
+000186,0036,9,LEFT,1,DONE,MEDIUM sedan crosses from left in broad intersection
+001200,0144,35,RIGHT,0,DONE,HIGH dark car enters from right on rural two-lane junction
+000465,0062,,,,SKIP,Target entry begins at the clip boundary amid multiple vehicles
+001159,0139,23,LEFT,1,DONE,HIGH white sedan crosses from left in broad multilane intersection
+000837,0108,19,LEFT,1,DONE,HIGH pickup crosses from left in broad junction
+000981,0121,,,,SKIP,Pickup is already alongside the ego path before a reliable entry frame
+000413,0057,24,LEFT,1,DONE,MEDIUM sedan crosses from left with adjacent paved lane available
+001020,0124,26,LEFT,1,DONE,MEDIUM dark sedan traverses from left in broad intersection
+000851,0109,,,,SKIP,Head-on narrow-road event has no clear LEFT or RIGHT path entry
+000612,0070,28,RIGHT,1,DONE,MEDIUM white SUV crosses from right in wide intersection area
+000678,0084,34,RIGHT,0,DONE,MEDIUM collision vehicle enters from right on parked urban two-lane road
+000940,0118,23,RIGHT,1,DONE,HIGH dark car crosses from right on divided multilane road
+000654,0073,17,RIGHT,0,DONE,HIGH white SUV enters from right on narrow rural road
+001206,0145,20,RIGHT,1,DONE,HIGH silver sedan crosses from right in broad junction
+000683,0085,,,,SKIP,Rear-end style event with no defensible lateral entry
+000803,0105,20,RIGHT,1,DONE,HIGH dark sedan crosses from right in broad intersection
+001489,0168,,,,SKIP,Large truck is already alongside and the side-swipe entry frame is uncertain
+000710,0089,,,,SKIP,Several oncoming and crossing vehicles make the final target ambiguous
+000490,0064,,,,SKIP,Sequential vehicles from different sides obscure the actual collision target
+001352,0159,11,LEFT,1,DONE,MEDIUM white car crosses from left in wide urban intersection
