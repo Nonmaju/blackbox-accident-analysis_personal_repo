@@ -257,153 +257,6 @@ def _lane_x_at(line, y):
     return m * y + b
 
 
-# --------------------------------------------------------------------------- trajectory tracking (entry_frame v2)
-# 2026-09-13: 팀원(정민)이 CCD 실측 entry_frame/entry_side/evasion_space 정답 36개(사람이
-# 직접 검수, review_status=DONE)를 공유해줘서 entry_frame이 이번 세션 처음으로 정량
-# 검증 가능해졌다(external/jungmin_labels/legacy_labels.csv). 우리 기존 로직(아래
-# _crosses_into_lane 기반)을 그 36개로 검증해보니 Accuracy@0.3s=16.7%(6/36), MAE=1.79초 -
-# 원인 진단(stage2_entry_diagnose2.py) 결과 "탐지가 안 돼서"가 아니라(0%) "차량이 처음부터
-# 차선 근처에 있으면 프레임 0 근처에서 바로 진입으로 오판"하는 게 대부분(정민 코드 주석:
-# "이게 v9의 지배적인 초반 오탐 원인이었다").
-#
-# 정민의 tools/stage2_track_v10_core.py(다중객체 그리디 트래킹 + "이전엔 코리도 밖에
-# 있다가 이후 안으로 전환하는 순간"만 진입으로 인정하는 판정)를 그대로 이식해서 같은
-# 36개로 우리 탐지기로 직접 재검증(stage2_track_v10_validate.py) - TRACK_CONTINUITY가
-# Accuracy@0.3s=22.2%(8/36), MAE=1.11초, entry_side=75.0%, evasion_space=52.8%로 전부
-# 기존보다 나음(정민 자신의 36개 재사용 검증과 달리, 우리는 이 라벨로 아무것도 설계한
-# 적이 없어 사실상 독립 재현). 프레임별 독립 재정렬(detect_vehicles/reranker) 대신
-# 이 트래킹으로 entry_frame/entry_side/evasion_space를 전부 교체한다.
-def _lane_bounds(lane, y: float) -> tuple:
-    values = [float(m) * float(y) + float(b) for m, b in lane]
-    return min(values), max(values)
-
-
-def _track_geometry(box, width: int, height: int):
-    x0, y0, x1, y1, score = map(float, box[:5])
-    return ((x0 + x1) / (2 * width), (y0 + y1) / (2 * height),
-             max(1.0, x1 - x0) / width, max(1.0, y1 - y0) / height, float(score))
-
-
-def _link_cost(previous, current, width: int, height: int, gap: int = 1) -> float:
-    """스케일 인지 연결 비용 - 1을 넘으면 연결 후보에서 제외."""
-    ax, ay, aw, ah, _ = _track_geometry(previous, width, height)
-    bx, by, bw, bh, _ = _track_geometry(current, width, height)
-    distance = np.hypot(ax - bx, ay - by) / max(0.035, 0.5 * (aw + bw), 0.5 * (ah + bh))
-    scale = abs(np.log((bw * bh + 1e-6) / (aw * ah + 1e-6)))
-    return float(distance / max(1.0, gap) + 0.35 * scale + 0.08 * (gap - 1))
-
-
-def _build_tracks(all_boxes: dict, width: int, height: int, max_gap: int = 3, max_cost: float = 2.2) -> list:
-    """그리디 이분매칭 - 결정적이고 외부 의존성 없음(제출 환경 그대로 동작)."""
-    tracks: list = []
-    for time_index in sorted(all_boxes):
-        boxes = sorted((tuple(map(float, box[:5])) for box in all_boxes[time_index]),
-                        key=lambda box: (-box[4], box[0], box[1]))[:16]
-        candidates = []
-        for track_index, track in enumerate(tracks):
-            gap = time_index - track["times"][-1]
-            if 1 <= gap <= max_gap:
-                for box_index, box in enumerate(boxes):
-                    cost = _link_cost(track["boxes"][-1], box, width, height, gap)
-                    if cost <= max_cost:
-                        candidates.append((cost, track_index, box_index))
-        used_tracks, used_boxes = set(), set()
-        for _, track_index, box_index in sorted(candidates):
-            if track_index in used_tracks or box_index in used_boxes:
-                continue
-            tracks[track_index]["times"].append(int(time_index))
-            tracks[track_index]["boxes"].append(boxes[box_index])
-            used_tracks.add(track_index); used_boxes.add(box_index)
-        for box_index, box in enumerate(boxes):
-            if box_index not in used_boxes:
-                tracks.append({"times": [int(time_index)], "boxes": [box]})
-    return tracks
-
-
-def _track_inside_ratio(box, lane) -> float:
-    x0, _, x1, y1 = map(float, box[:4])
-    left, right = _lane_bounds(lane, y1)
-    overlap = max(0.0, min(x1, right) - max(x0, left))
-    return overlap / max(1.0, x1 - x0)
-
-
-def _track_features(track: dict, lane, collision: int, width: int, height: int) -> dict:
-    times, boxes = track["times"], track["boxes"]
-    usable = [(t, b) for t, b in zip(times, boxes) if t <= collision + 3]
-    if not usable or not any(t <= collision for t, _ in usable):
-        return {"score": -1e9, "entry": None, "side": "RIGHT", "crossing": False,
-                "terminal_distance": 10**9, "length": 0, "continuity": 0.0}
-    times = [x[0] for x in usable]; boxes = [x[1] for x in usable]
-    inside = [_track_inside_ratio(box, lane) for box in boxes]
-    crossing_index = None
-    for index in range(len(times)):
-        future = inside[index:min(len(inside), index + 3)]
-        previous = inside[max(0, index - 2):index]
-        if inside[index] >= 0.10 and sum(value >= 0.10 for value in future) >= min(2, len(future)):
-            # 처음부터 코리도 안에 있는 건 진입 증거가 아니다 - 직전(median)이 코리도
-            # 밖(<10%)이었다가 지금 안으로 전환되는 순간만 인정(v9의 지배적 초반 오탐 방지).
-            if previous and float(np.median(previous)) < 0.10:
-                crossing_index = index
-                break
-    entry = times[crossing_index] if crossing_index is not None else None
-    side_samples = boxes[max(0, (crossing_index or 0) - 3):(crossing_index or 0) + 1]
-    offsets = []
-    for box in side_samples:
-        x0, _, x1, y1 = box[:4]
-        left, right = _lane_bounds(lane, y1)
-        offsets.append((x0 + x1) / 2 - (left + right) / 2)
-    side = "LEFT" if offsets and float(np.median(offsets)) < 0 else "RIGHT"
-    terminal_index = int(np.argmin([abs(t - collision) for t in times]))
-    terminal_time, terminal = times[terminal_index], boxes[terminal_index]
-    x0, y0, x1, y1, confidence = terminal
-    area = (x1 - x0) * (y1 - y0) / max(1.0, width * height)
-    terminal_distance = abs(terminal_time - collision)
-    continuity = len(times) / max(1, times[-1] - times[0] + 1)
-    areas = [(b[2] - b[0]) * (b[3] - b[1]) for b in boxes]
-    expansion = np.log((areas[-1] + 1) / (areas[0] + 1)) / max(1, len(areas) - 1)
-    lateral = 0.0
-    if len(boxes) >= 2:
-        lateral = abs(((boxes[-1][0] + boxes[-1][2]) - (boxes[0][0] + boxes[0][2])) / (2 * width))
-    score = (2.0 * _track_inside_ratio(terminal, lane) + 1.2 * min(1.0, area / 0.08) + 0.45 * confidence
-             + 0.65 * continuity + 0.35 * min(1.0, max(0.0, expansion) / 0.08)
-             + 0.45 * min(1.0, lateral / 0.15) - 0.18 * terminal_distance)
-    if crossing_index is not None and entry <= collision:
-        score += 0.9 + 0.25 * min(1.0, (collision - entry) / max(1, collision))
-    return {"score": float(score), "entry": entry, "side": side,
-            "crossing": crossing_index is not None, "terminal": terminal,
-            "terminal_distance": terminal_distance, "length": len(times), "continuity": float(continuity)}
-
-
-def trajectory_scene(all_boxes: dict, lane, height: int, width: int, collision: int) -> dict:
-    """TRACK_CONTINUITY: 충돌과 이어지는 트랙 중 스코어가 가장 높은 것을 상대차량으로
-    선택 - 프레임 하나하나 독립적으로 고르는 대신, 전체 궤적(위치/크기/신뢰도/연속성/
-    확장/횡이동 종합)을 보고 고른다. CCD 실측 36라벨 검증: Accuracy@0.3s 16.7%->22.2%,
-    MAE 1.79->1.11초, entry_side 69.4%->75.0%, evasion_space 50.0%->52.8%."""
-    tracks = _build_tracks(all_boxes, width, height)
-    featured = [(track, _track_features(track, lane, collision, width, height)) for track in tracks]
-    eligible = [(track, feature) for track, feature in featured
-                if feature["terminal_distance"] <= 5 and feature["length"] >= 2]
-    selected = max(eligible, key=lambda item: item[1]["score"], default=None)
-    if selected is None:
-        return {"entry": int(max(0, collision)), "side": "RIGHT", "evasion": 0,
-                "collision_box_frame": None, "collision_box": None}
-    track, feature = selected
-    if feature["entry"] is None:
-        # 진입 프레임을 임의로 만들지 않는다 - 이 트랙에서 실제 관측된 첫 시점을 쓴다.
-        pre_collision = [t for t in track["times"] if t <= collision]
-        entry = min(pre_collision) if pre_collision else max(0, collision)
-    else:
-        entry = int(feature["entry"])
-    terminal = feature["terminal"]
-    x0, _, x1, y1 = terminal[:4]
-    left, right = _lane_bounds(lane, y1)
-    lane_width = max(1.0, right - left)
-    evasion = int(max(max(0.0, x0 - left), max(0.0, right - x1)) >= 0.32 * lane_width)
-    return {"entry": min(int(collision), int(entry)), "side": feature["side"], "evasion": evasion,
-            "collision_box_frame": track["times"][int(np.argmin([abs(t - collision) for t in track["times"]]))],
-            "collision_box": terminal}
-
-
 def _crosses_into_lane(box, lane):
     """박스 하단(바퀴 접지 근사)이 차선 경계 구간과 조금이라도 겹치면 진입으로 판단."""
     x0, _, x1, y1 = box[:4]
@@ -413,40 +266,67 @@ def _crosses_into_lane(box, lane):
     return x1 > lx and x0 < rx
 
 
-# --------------------------------------------------------------------------- entry/evasion/side (2026-09-13: CCD 실측 36라벨로 검증됨)
+# --------------------------------------------------------------------------- entry/evasion/side (라벨 없음, 휴리스틱)
 def find_entry_and_scene(model, transform, categories, frames: list, collision_frame: int, reranker=None):
     """상대차량이 자차 차선에 처음 '진입'하는 시점/방향, 충돌 직전 여유공간.
 
-    trajectory_scene(TRACK_CONTINUITY) 기반 - 프레임 독립 탐지+재정렬(reranker) 대신
-    전체 후보를 그리디로 이어붙인 다중객체 트랙 중 충돌과 이어지는 가장 그럴듯한 트랙을
-    골라 그 트랙의 "코리도 밖->안 전환" 시점을 진입으로 쓴다. reranker 인자는 옛 시그니처
-    호환용으로만 남겨둠(더는 안 씀 - trajectory_scene 자체가 선택 로직을 대신함).
+    entry_frame: 대회 공식 정의("피해차량 바퀴가 피의차량 차선에 최초로 닿는 시점", talkboard
+    417186/417277)에 맞춰 화면 면적(area_frac) 프록시를 완전히 버리고 차선 추정 기반으로
+    교체. Hough 검출이 성공하면 그 값을, 실패하면(DACON 공개 5샘플 전부 실패 - 사거리/
+    근접촬영이 많아 차선이 거의 수평이거나 표시가 흐림, talkboard 417288 참고)
+    _default_lane()(자차 중앙, 차선폭 화면폭의 38% 가정)을 써서 "차선 진입" 개념 자체는
+    검출 성패와 무관하게 유지한다(area_frac은 정의 자체가 다른 값이라 폴백으로도 안 씀).
 
-    entry_frame 공식 정의(talkboard 417186/417277 - "피해차량 바퀴가 피의차량 차선에
-    최초로 닿는 시점"), evasion_space 공식 정의(talkboard 417319 - "자차가 진행방향을
-    바꿔 피할 수 있는 물리적 공간")는 그대로 유지, 판정 방식만 트래킹으로 교체.
-    검증: CCD 실측 36라벨(external/jungmin_labels/legacy_labels.csv) 기준 Accuracy@0.3s
-    16.7%->22.2%, MAE 1.79->1.11초, entry_side 69.4%->75.0%, evasion_space 50.0%->52.8%
-    (stage2_track_v10_validate.py, 우리 탐지기로 직접 재현 - 이 라벨로 뭘 설계한 적이
-    없어 사실상 독립 검증).
+    검색 구간을 collision_frame-30에서 -90으로 넓히고(entry가 area 기준보다 훨씬 이른
+    프레임에서 걸릴 수 있어서), 못 찾으면 collision_frame이 아니라 window_lo로 폴백
+    (talkboard 417277: "영상 시작 이전에 이미 진입했다면 첫 프레임을 제출" - window_lo가
+    0이면 정확히 이 규칙과 일치).
+
+    evasion_space: 공식 정의(talkboard 417319 - "자차가 진행방향을 바꿔 피할 수 있는
+    물리적 공간")에 맞춰 상대차량 박스 좌우 여백(자차와 무관한 기준이었음) 대신 자차
+    차선 경계 바로 옆 인접공간의 차량 점유 여부로 교체(_evasion_space_from_lane).
+    entry_side는 이번 변경에서 안 건드림.
     """
     h, w = frames[0].shape[:2]
-    high = min(len(frames) - 1, collision_frame + 3)
-    sampled = sorted(set(np.rint(np.linspace(0, high, min(96, high + 1))).astype(int).tolist()))
+    window_lo = max(0, collision_frame - 90)
+    window_hi = min(len(frames) - 1, collision_frame + 5)  # 충돌 직후 몇 프레임도 봐야 근접탐지 fallback 가능
 
-    all_boxes = {}
-    for t in sampled:
-        boxes = detect_all_vehicles(model, transform, categories, frames[t], score_thr=SCORE_THR)
-        if boxes:
-            all_boxes[t] = boxes
+    detections = {}
+    for t in range(window_lo, window_hi + 1):
+        det = detect_vehicles(model, transform, categories, frames[t], reranker=reranker)
+        if det is not None:
+            detections[t] = det
 
-    lane = estimate_ego_lane(frames, sampled, h, w) if sampled else _default_lane(h, w)
-    result = trajectory_scene(all_boxes, lane, h, w, collision_frame)
+    lane = estimate_ego_lane(frames, detections.keys(), h, w) if detections else _default_lane(h, w)
 
-    return (
-        result["entry"], result["side"], result["evasion"],
-        result["collision_box_frame"], result["collision_box"],
-    )
+    entry_frame, entry_side = None, None
+    for t in sorted(t for t in detections if t <= collision_frame):
+        det = detections[t]
+        x0, _, x1, _, _ = det
+        if _crosses_into_lane(det, lane):
+            entry_frame = t
+            entry_side = "LEFT" if (x0 + x1) / 2 < w / 2 else "RIGHT"
+            break
+
+    if entry_frame is None:  # 못 찾으면 검색 구간 시작점으로 폴백(0이면 "시작 전 진입" 규칙과 일치)
+        entry_frame, entry_side = window_lo, "RIGHT"
+
+    # 충돌 순간은 모션블러로 탐지가 자주 빠진다 — 가장 가까운 프레임의 박스로 대체(0으로 뭉개지 않게)
+    box_at_collision = None
+    if detections:
+        nearest_t = min(detections, key=lambda t: abs(t - collision_frame))
+        box_at_collision = detections[nearest_t]
+
+    evasion_space = 0
+    collision_box_frame, collision_box = None, None
+    if box_at_collision is not None:
+        collision_box_frame, collision_box = nearest_t, box_at_collision
+        _, y0, _, y1, _ = box_at_collision
+        evasion_space = _evasion_space_from_lane(
+            frames[nearest_t], lane, model, transform, categories, y_ref=y1, w=w
+        )
+
+    return entry_frame, entry_side, evasion_space, collision_box_frame, collision_box
 
 
 def _evasion_space_from_lane(frame, lane, model, transform, categories, y_ref: float, w: float) -> int:
